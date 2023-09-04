@@ -1,4 +1,5 @@
 type: ddim
+set_model_outputs: False
 target: inference.libs.scheduler.ddim_schedule.DDIMScheduler
 params:
   num_train_timesteps: 1000

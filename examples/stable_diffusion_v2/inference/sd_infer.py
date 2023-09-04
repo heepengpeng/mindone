@@ -36,6 +36,8 @@ def main(args):
     )
     sampler_config = OmegaConf.load(args.sampler)
     scheduler = instantiate_from_config(sampler_config)
+    if sampler_config.set_model_outputs:
+        scheduler.set_model_outputs((args.n_samples, 4, args.inputs.H // 8, args.inputs.W // 8))
     timesteps = scheduler.set_timesteps(args.sampling_steps)
 
     # read prompts
