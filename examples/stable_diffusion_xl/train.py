@@ -14,7 +14,7 @@ from gm.helpers import (
     save_checkpoint,
     set_default,
 )
-from gm.util import get_obj_from_str, instantiate_from_config
+from gm.util import get_obj_from_str, instantiate_from_config, Trainer
 from omegaconf import OmegaConf
 
 import mindspore as ms
@@ -23,12 +23,19 @@ from mindspore import Tensor
 
 def get_parser_train():
     parser = argparse.ArgumentParser(description="train with sd-xl")
-    parser.add_argument("--version", type=str, default="SDXL-base-1.0")
-    parser.add_argument("--sd_xl_base_ratios", type=str, default="1.0")
+    parser.add_argument("--version", type=str, default="SDXL-base-1.0", choices=["SDXL-base-1.0", "SDXL-refiner-1.0"])
     parser.add_argument("--config", type=str, default="configs/training/sd_xl_base_finetune_lora.yaml")
-    parser.add_argument("--task", type=str, default="txt2img", choices=["txt2img", "img2img"])
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="txt2img",
+        choices=[
+            "txt2img",
+        ],
+    )
     parser.add_argument("--weight", type=str, default="checkpoints/sd_xl_base_1.0_ms.ckpt")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sd_xl_base_ratios", type=str, default="1.0")
     parser.add_argument("--data_path", type=str, default="")
     parser.add_argument("--save_path", type=str, default="./runs")
     parser.add_argument("--log_interval", type=int, default=1, help="log interval")
@@ -103,10 +110,36 @@ def train(args):
     )
     reducer = get_grad_reducer(is_parallel=False, parameters=optimizer.parameters)
     scaler = get_loss_scaler(ms_loss_scaler="static", scale_value=1024)
-    train_step_fn = partial(
-        model.train_step,
-        grad_func=model.get_grad_func(optimizer, reducer, scaler, jit=True),
-    )
+    # train_step_fn = partial(
+    #     model.train_step,
+    #     grad_func=model.get_grad_func(optimizer, reducer, scaler, jit=True),
+    # )
+    #
+    # trainer = Trainer(model, optimizer, reducer, scaler)
+    #
+    from gm.util.trainer_factory import TrainNetwork, TrainOneStepSubCell
+    from mindspore import ops
+    train_network = TrainNetwork(model, scaler)
+    train_one_step_sub_cell = TrainOneStepSubCell(train_network, optimizer, reducer, scaler)
+    # @ms.jit
+    def train_step_fn(x, tokens):
+        # get latent
+        x = model.encode_first_stage(x)
+        print("Encoder Done.")
+        context, y = model.conditioner(tokens)
+        print("Conditioner Done.")
+
+        sigmas = model.sigma_sampler(x.shape[0])
+        noise = ops.randn_like(x)
+        noised_input = model.loss_fn.get_noise_input(x, noise, sigmas)
+        w = model.denoiser.w(sigmas)
+
+        # get loss
+        print("Compute Loss Starting...")
+        loss, _, _ = train_one_step_sub_cell(x, noised_input, sigmas, w, context=context, y=y)
+        print("Compute Loss Done.")
+
+        return loss
 
     # Start Training
     if args.task == "txt2img":
@@ -136,7 +169,10 @@ def train_txt2img(args, train_step_fn, dataloader, optimizer=None, model=None): 
                 "You can come back later :).",
                 flush=True,
             )
-        loss = train_step_fn(data)
+
+        x = data[model.input_key]
+        tokens = model.conditioner.tokenize(data)
+        loss = train_step_fn(x, tokens)
 
         # Print meg
         if (i + 1) % args.log_interval == 0 and args.rank % 8 == 0:
@@ -145,8 +181,8 @@ def train_txt2img(args, train_step_fn, dataloader, optimizer=None, model=None): 
             else:
                 cur_lr = optimizer.learning_rate.asnumpy().item()
             print(
-                f"Step {i + 1}/{total_step}, lr: {cur_lr}, loss: {loss.asnumpy():.6f}, "
-                f"time cost: {(time.time()-s_time) * 1000 / args.log_interval:.2f} ms",
+                f"Step {i + 1}/{total_step}, size: {data['image'].shape[2:]}, lr: {cur_lr}, loss: {loss.asnumpy():.6f}"
+                f", time cost: {(time.time()-s_time) * 1000 / args.log_interval:.2f} ms",
                 flush=True,
             )
             s_time = time.time()
