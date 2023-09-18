@@ -4,20 +4,18 @@ import os
 import sys
 import time
 
+import mindspore as ms
 import numpy as np
 from omegaconf import OmegaConf
-from PIL import Image
 
-import mindspore as ms
+from libs.util import instantiate_from_config
+from libs.logger import set_logger
 
 workspace = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(workspace))
 
-from ldm.models.clip.simple_tokenizer import get_tokenizer
-from ldm.modules.logger import set_logger
-from ldm.util import instantiate_from_config
 from libs.helper import VaeImageProcessor
-from libs.infer_engine.sd_lite_models import SDLiteImg2Img, SDLiteInpaint, SDLiteText2Img
+from libs.infer_engine.sd_lite_models import SDLiteText2Img
 
 logger = logging.getLogger("Stable Diffusion Lite Deploy")
 
@@ -115,44 +113,6 @@ def main(args):
             device_id=int(os.getenv("DEVICE_ID", 0)),
             num_inference_steps=args.sampling_steps,
         )
-    elif args.task == "img2img":
-        sd_infer = SDLiteImg2Img(
-            data_prepare,
-            scheduler_preprocess,
-            predict_noise,
-            noisy_sample,
-            vae_decoder,
-            device_target=args.device_target,
-            device_id=int(os.getenv("DEVICE_ID", 0)),
-            num_inference_steps=args.sampling_steps,
-        )
-        init_image = Image.open(args.inputs.image_path).convert("RGB")
-        img = img_processor.preprocess(init_image, height=args.inputs.H, width=args.inputs.W)
-        inputs["img"] = img.repeat(batch_size, axis=0).asnumpy()
-        init_timestep = min(int(args.sampling_steps * args.inputs.strength), args.sampling_steps)
-        t_start = max(args.sampling_steps - init_timestep, 0)
-        inputs["timesteps"] = inputs["timesteps"][t_start * scheduler.order :]
-    elif args.task == "inpaint":
-        sd_infer = SDLiteInpaint(
-            data_prepare,
-            scheduler_preprocess,
-            predict_noise,
-            noisy_sample,
-            vae_decoder,
-            device_target=args.device_target,
-            device_id=int(os.getenv("DEVICE_ID", 0)),
-            num_inference_steps=args.sampling_steps,
-        )
-        init_image = Image.open(args.inputs.image_path).convert("RGB")
-        image = img_processor.resize(init_image, args.inputs.H, args.inputs.W)
-        image = np.array(image)[None].transpose(0, 3, 1, 2)
-        image = (image / 127.5 - 1.0).astype(np.float32)
-        mask = Image.open(args.inputs.mask_path).convert("L")
-        mask = img_processor.resize(mask, args.inputs.H, args.inputs.W, resample="nearest")
-        mask = (np.array(mask)[None, None] / 255.0 > 0.5).astype(np.float32)
-        masked_image = image * (1 - mask)
-        inputs["masked_image"] = np.repeat(masked_image, batch_size, axis=0).astype(np.float16)
-        inputs["mask"] = np.repeat(mask, batch_size, axis=0).astype(np.float16)
     else:
         raise ValueError(f"Not support task: {args.task}")
 
@@ -196,7 +156,7 @@ if __name__ == "__main__":
         type=str,
         default="text2img",
         help="Task name, should be [text2img, img2img], "
-        "if choose a task name, use the config/[task].yaml for inputs",
+             "if choose a task name, use the config/[task].yaml for inputs",
         choices=["text2img", "img2img", "inpaint"],
     )
     parser.add_argument("--model", type=str, default=None, help="path to config which constructs model.")
@@ -215,8 +175,8 @@ if __name__ == "__main__":
         type=float,
         default=9.0,
         help="unconditional guidance scale: "
-        "eps = eps(x, uncond) + scale * (eps(x, cond) - eps(x, uncond)). "
-        "Simplified: `uc + scale * (uc - prompt)`",
+             "eps = eps(x, uncond) + scale * (eps(x, cond) - eps(x, uncond)). "
+             "Simplified: `uc + scale * (uc - prompt)`",
     )
     parser.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
     parser.add_argument("--log_level", type=str, default="INFO", help="log level, options: DEBUG, INFO, WARNING, ERROR")

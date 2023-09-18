@@ -239,11 +239,8 @@ class GeneralConditioner(nn.Cell):
                     output[out_key] = ops.concat((output[out_key], emb), self.KEY2CATDIM[out_key])
                 else:
                     output[out_key] = emb
-
-        # return output
-
-        context = output.get("crossattn", None)
-        y = output.get("vector", None)
+        context = output.get("crossattn", None).to(ms.float32)
+        y = output.get("vector", None).to(ms.float32)
         return context, y
 
     def get_unconditional_conditioning(self, batch_c, batch_uc=None, force_uc_zero_embeddings=None):
@@ -278,8 +275,10 @@ class FrozenCLIPEmbedder(AbstractEmbModel):
     ):  # clip-vit-base-patch32
         super().__init__()
         assert layer in self.LAYERS
-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
-        self.transformer = CLIPTextModel(config_path="openai/clip-vit-large-patch14", weight=pretrained)
+        # self.tokenizer = CLIPTokenizer.from_pretrained(version)
+        # self.transformer = CLIPTextModel(config_path="openai/clip-vit-large-patch14", weight=pretrained)
+        self.tokenizer = CLIPTokenizer.from_pretrained("/disk1/mindone/hpp/020dataset/models--openai--clip-vit-large-patch14/snapshots/8d052a0f05efbaefbc9e8786ba291cfdf93e5bff")
+        self.transformer = CLIPTextModel(config_path="/disk1/mindone/hpp/020dataset/models--openai--clip-vit-large-patch14/snapshots/8d052a0f05efbaefbc9e8786ba291cfdf93e5bff", weight=pretrained)
 
         if freeze:
             self.freeze()

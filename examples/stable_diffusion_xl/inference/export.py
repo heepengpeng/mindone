@@ -17,7 +17,7 @@ from libs.infer_engine.export_modules import (
     NoisySample,
     PredictNoise,
     SchedulerPreProcess,
-    Text2ImgDataPrepare,
+    Text2ImgDataPrepare, VAEDecoder,
 )
 
 logger = logging.getLogger("Stable Diffusion XL Export")
@@ -30,6 +30,7 @@ def model_export(net, inputs, name, model_save_path):
 
 def lite_convert(name, model_save_path, converter):
     import mindspore_lite as mslite
+    logger.info(f"convert {name} lite mindir starting")
 
     mindir_path = os.path.join(model_save_path, f"{name}.mindir")
     if not os.path.exists(mindir_path):
@@ -51,8 +52,6 @@ def main(args):
     config = OmegaConf.load(f"{args.model}")
     sampler_config = OmegaConf.load(args.sampler)
     scheduler = instantiate_from_config(sampler_config)
-    if config.model.prediction_type == "v":
-        sampler_config.params.prediction_type = "v_prediction"
     scheduler_type = sampler_config.type
 
     args.model_save_path = f"{config.model.name}-{args.task}"
@@ -72,7 +71,7 @@ def main(args):
         version = config.model.version
         os.environ["SD_VERSION"] = version
         model = load_model_from_config(
-            config,
+            config.model,
             ckpt=config.model.pretrained_ckpt,
             freeze=True, load_filter=False, amp_level=args.ms_amp_level
         )
@@ -86,7 +85,13 @@ def main(args):
                              ops.ones((1, 2), dtype=ms.float16)]
 
         output_dim = 1024
-        c_crossattn = ops.ones((batch_size * 2, 77, output_dim * 2), ms.float16)
+
+        cond = {
+            "concat": None,
+            "context": ops.ones((batch_size * 2, 77, output_dim * 2), ms.float32),
+            "y": ops.ones((batch_size*2, 2816), ms.float32)
+        }
+
         noise = ops.ones((batch_size, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float16)
         ts = ops.ones((), ms.int32)
         img = ops.ones((batch_size, 3, args.inputs.H, args.inputs.W), ms.float16)
@@ -120,7 +125,7 @@ def main(args):
             predict_noise = PredictNoise(unet)
             model_export(
                 net=predict_noise,
-                inputs=(noise, ts, c_crossattn, scale),
+                inputs=(noise, ts, cond, scale),
                 name=args.inputs.predict_noise_model,
                 model_save_path=model_save_path,
             )
@@ -133,6 +138,7 @@ def main(args):
                 model_save_path=model_save_path,
             )
         if vae_decoder is None:
+            vae_decoder = VAEDecoder(vae, model.scale_factor)
             model_export(
                 net=vae_decoder, inputs=(noise,), name=args.inputs.vae_decoder_model, model_save_path=model_save_path
             )
@@ -192,6 +198,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
     parser.add_argument("--log_level", type=str, default="INFO", help="log level, options: DEBUG, INFO, WARNING, ERROR")
+    parser.add_argument("--ms_amp_level", type=str, default="O2")
     args = parser.parse_args()
     set_logger(name="", output_dir=args.output_path, rank=0, log_level=args.log_level)
 

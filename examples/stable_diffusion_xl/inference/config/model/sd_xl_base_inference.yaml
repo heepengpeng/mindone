@@ -1,4 +1,7 @@
 model:
+  name: sdxl-inference
+  version: "sdxl"
+  pretrained_ckpt: models/sd_xl_base_1.0_ms.ckpt
   target: gm.models.diffusion.DiffusionEngine
   params:
     scale_factor: 0.13025

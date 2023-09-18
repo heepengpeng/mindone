@@ -9,7 +9,7 @@ from PIL import Image
 from mindspore import ops
 
 from gm.helpers import load_model_from_config as load_model
-
+from libs.util import set_random_seed
 logger = logging.getLogger()
 
 PIL_INTERPOLATION = {

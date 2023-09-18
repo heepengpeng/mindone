@@ -27,6 +27,8 @@ from mindspore import load_checkpoint, load_param_into_net
 
 _logger = logging.getLogger(__name__)
 
+import random
+import numpy as np
 
 def log_txt_as_img(wh, xc, size=10):
     # wh a tuple of (width, height)
@@ -121,3 +123,10 @@ def load_pretrained_model(pretrained_ckpt, net):
         _logger.info("Params not load: {}".format(param_not_load))
     else:
         _logger.warning("Checkpoint file not exists!!!")
+
+def set_random_seed(seed):
+    """Set Random Seed"""
+    _logger.debug("Random seed: ", seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    ms.set_seed(seed)
