@@ -19,34 +19,47 @@ class DataPrepare(nn.Cell):
         self.vae = vae
         self.scheduler = scheduler
         self.scale_factor = scale_factor
-        self.alphas_cumprod = scheduler.alphas_cumprod
 
-    def vae_encode(self, x):
-        image_latents = self.vae.encode(x)
-        image_latents = image_latents * self.scale_factor
-        return image_latents.astype(ms.float16)
 
-    def latents_add_noise(self, image_latents, noise, ts):
-        latents = self.scheduler.add_noise(image_latents, noise, self.alphas_cumprod[ts])
-        return latents
+class Discretization(nn.Cell):
+    def __init__(self, discretization):
+        super(Discretization).__init__()
+        self.discretization = discretization
 
-    def prompt_embed(self, prompt_data, negative_prompt_data):
-        pos_prompt_embeds = self.text_encoder(prompt_data)
-        negative_prompt_embeds = self.text_encoder(negative_prompt_data)
+    def construct(self):
+        return self.discretization()
 
-        c = {"crossattn": pos_prompt_embeds[0], "vector": pos_prompt_embeds[1]}
-        uc = {"crossattn": negative_prompt_embeds[0], "vector": negative_prompt_embeds[1]}
 
-        c_out = dict()
+class SchedulerPreModelInput(nn.Cell):
 
-        for k in c:
-            if k in ["vector", "crossattn", "concat"]:
-                c_out[k] = ops.concat((uc[k], c[k]), 0)
-            else:
-                assert c[k] == uc[k]
-                c_out[k] = c[k]
+    def __init__(self, scheduler):
+        super(SchedulerPreModelInput, self).__init__()
+        self.scheduler = scheduler
 
-        return c_out
+    def construct(self, x, i, s_in):
+        noised_input, sigma_hat_s, next_sigma, sigma_hat = self.scheduler.pre_model_input(iter_index=i, x=x, s_in=s_in)
+        return noised_input, sigma_hat_s, next_sigma, sigma_hat
+
+
+class SchedulerPrepareSamplingLoop(nn.Cell):
+    def __init__(self, scheduler):
+        super(SchedulerPrepareSamplingLoop, self).__init__()
+        self.scheduler = scheduler
+
+    def construct(self, latents):
+        x, s_in = self.scheduler.prepare_sampling_loop(latents)
+        return x, s_in
+
+
+class Denoiser(nn.Cell):
+
+    def __init__(self, denoiser):
+        super(Denoiser, self).__init__()
+        self.denoiser = denoiser
+
+    def construct(self, sigma_hat_s, ndim):
+        c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hat_s, ndim)
+        return c_skip, c_out, c_in, c_noise
 
 
 class PredictNoise(nn.Cell):
@@ -60,56 +73,13 @@ class PredictNoise(nn.Cell):
         guidance_rescale (float): A higher guidance scale value for noise rescale.
     """
 
-    def __init__(self, unet, guidance_rescale=0.0):
+    def __init__(self, unet):
         super(PredictNoise, self).__init__()
         self.unet = unet
-        self.guidance_rescale = guidance_rescale
 
-    def predict_noise(self, x, t_continuous, cond, guidance_scale):
-        """
-        The noise predicition model function that is used for DPM-Solver.
-        """
-        t_continuous = ops.tile(t_continuous.reshape(1), (x.shape[0],))
-        x_in = ops.concat([x] * 2, axis=0)
-        t_in = ops.concat([t_continuous] * 2, axis=0)
-        noise_pred = self.unet(x_in, t_in, **cond)
-        noise_pred_uncond, noise_pred_text = ops.split(noise_pred, split_size_or_sections=noise_pred.shape[0] // 2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-        if self.guidance_rescale > 0:
-            noise_pred = self.rescale_noise_cfg(noise_pred, noise_pred_text)
+    def construct(self, noised_input, c_noise, context, y):
+        noise_pred = self.unet(x=noised_input, t=c_noise, context=context, contact=None, y=y)
         return noise_pred
-
-    def rescale_noise_cfg(self, noise_pred, noise_pred_text):
-        """
-        Rescale `noise_pred` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
-        Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
-        """
-        std_text = ops.std(noise_pred_text, axis=tuple(range(1, len(noise_pred_text.shape))), keepdims=True)
-        std_cfg = ops.std(noise_pred, axis=tuple(range(1, len(noise_pred.shape))), keepdims=True)
-        # rescale the results from guidance (fixes overexposure)
-        noise_pred_rescaled = noise_pred * (std_text / std_cfg)
-        # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
-        noise_pred = self.guidance_rescale * noise_pred_rescaled + (1 - self.guidance_rescale) * noise_pred
-        return noise_pred
-
-    def construct(self, latents, ts, c_crossattn, guidance_scale):
-        return self.predict_noise(latents, ts, c_crossattn, guidance_scale)
-
-
-class SchedulerPreProcess(nn.Cell):
-    """
-    Pre process of sampler.
-
-    Args:
-        scheduler (nn.Cell): A scheduler to be used in combination with `unet` to denoise the encoded image latents.
-    """
-
-    def __init__(self, scheduler):
-        super(SchedulerPreProcess, self).__init__()
-        self.scheduler = scheduler
-
-    def construct(self, latents, t):
-        return self.scheduler.scale_model_input(latents, t)
 
 
 class NoisySample(nn.Cell):
@@ -124,8 +94,10 @@ class NoisySample(nn.Cell):
         super(NoisySample, self).__init__()
         self.scheduler = scheduler
 
-    def construct(self, noise_pred, ts, latents, num_inference_steps):
-        return self.scheduler(noise_pred, ts, latents, num_inference_steps)
+    def construct(self, model_output, c_out, noised_input, c_skip, scale, x, sigma_hat, next_sigma):
+        return self.scheduler(model_output=model_output, c_out=c_out, noised_input=noised_input, c_skip=c_skip,
+                              scale=scale, x=x,
+                              sigma_hat=sigma_hat, next_sigma=next_sigma)
 
 
 class VAEDecoder(nn.Cell):
@@ -143,7 +115,7 @@ class VAEDecoder(nn.Cell):
         self.scale_factor = scale_factor
 
     def vae_decode(self, x):
-        y = self.vae.decode(x / self.scale_factor)
+        y = self.vae.decode(ms.ops.div(x, self.scale_factor))
         y = ops.clip_by_value((y + 1.0) / 2.0, clip_value_min=0.0, clip_value_max=1.0)
         return y
 
@@ -159,6 +131,9 @@ class Text2ImgDataPrepare(DataPrepare):
     def __init__(self, text_encoder, vae, scheduler, scale_factor=1.0):
         super(Text2ImgDataPrepare, self).__init__(text_encoder, vae, scheduler, scale_factor=scale_factor)
 
-    def construct(self, prompt_data, negative_prompt_data, noise):
-        c_crossattn = self.prompt_embed(prompt_data, negative_prompt_data)
-        return c_crossattn, noise
+    def construct(self, clip_tokens, time_tokens, uc_clip_tokens, uc_time_tokens, noise):
+        pos_prompt_embeds = self.text_encoder(clip_tokens.split(1) + time_tokens.split(1))
+        negative_prompt_embeds = self.text_encoder(uc_clip_tokens.split(1) + uc_time_tokens.split(1))
+        crossattn = ops.concat((negative_prompt_embeds[0], pos_prompt_embeds[0]), 0)
+        vector = ops.concat((negative_prompt_embeds[1], pos_prompt_embeds[1]), 0)
+        return crossattn, vector, noise

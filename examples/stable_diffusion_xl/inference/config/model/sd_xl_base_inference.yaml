@@ -50,6 +50,7 @@ model:
               layer: hidden
               layer_idx: 11
               version: openai/clip-vit-large-patch14
+            tokenizer_name: CLIPTokenizer
               # pretrained: ''
           # crossattn and vector cond
           - is_trainable: False
@@ -63,25 +64,28 @@ model:
               legacy: False
               require_pretrained: False
               # pretrained: ''  # laion2b_s32b_b79k.ckpt
+            tokenizer_name: SimpleTokenizerWrapper
           # vector cond
           - is_trainable: False
             input_key: original_size_as_tuple
             target: gm.modules.embedders.modules.ConcatTimestepEmbedderND
             params:
               outdim: 256  # multiplied by two
+            tokenizer_name: IdentityTokenizer
           # vector cond
           - is_trainable: False
             input_key: crop_coords_top_left
             target: gm.modules.embedders.modules.ConcatTimestepEmbedderND
             params:
               outdim: 256  # multiplied by two
+            tokenizer_name: IdentityTokenizer
           # vector cond
           - is_trainable: False
             input_key: target_size_as_tuple
             target: gm.modules.embedders.modules.ConcatTimestepEmbedderND
             params:
               outdim: 256  # multiplied by two
-
+            tokenizer_name: IdentityTokenizer
     first_stage_config:
       target: gm.models.autoencoder.AutoencoderKLInferenceWrapper
       params:

@@ -6,10 +6,11 @@ import PIL
 import mindspore as ms
 import numpy as np
 from PIL import Image
+from libs.util import set_random_seed
 from mindspore import ops
 
 from gm.helpers import load_model_from_config as load_model
-from libs.util import set_random_seed
+
 logger = logging.getLogger()
 
 PIL_INTERPOLATION = {
@@ -232,3 +233,7 @@ class VaeImageProcessor:
 
         if output_type == "pil":
             return self.numpy_to_pil(image)
+
+
+def exists(x):
+    return x is not None

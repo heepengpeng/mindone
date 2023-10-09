@@ -4,8 +4,6 @@ import mindspore as ms
 from mindspore import ops
 from tqdm import tqdm
 
-from gm.helpers import get_batch, get_unique_embedder_keys_from_conditioner
-
 
 class SDInfer(ABC):
     """
@@ -27,25 +25,21 @@ class SDInfer(ABC):
             unet,
             vae,
             scheduler,
+            denoiser,
             scale_factor=1.0,
             guidance_rescale=0.0,
-            num_inference_steps=50,
+            num_inference_steps=40,
     ):
         super().__init__()
         self.text_encoder = text_encoder
         self.unet = unet
         self.vae = vae
         self.scheduler = scheduler
+        self.denoiser = denoiser
         self.scale_factor = scale_factor
         self.guidance_rescale = guidance_rescale
         self.num_inference_steps = ms.Tensor(num_inference_steps, ms.int32)
         self.alphas_cumprod = scheduler.alphas_cumprod
-
-    @ms.jit
-    def vae_encode(self, x):
-        image_latents = self.vae.encode(x)
-        image_latents = image_latents * self.scale_factor
-        return image_latents.astype(ms.float16)
 
     @ms.jit
     def vae_decode(self, x):
@@ -53,66 +47,24 @@ class SDInfer(ABC):
         y = ops.clip_by_value((y + 1.0) / 2.0, clip_value_min=0.0, clip_value_max=1.0)
         return y
 
-    @ms.jit
-    def prompt_embed(self, prompt_data, negative_prompt_data):
-        pos_prompt_embeds = self.text_encoder(prompt_data)
-        negative_prompt_embeds = self.text_encoder(negative_prompt_data)
-        prompt_embeds = ops.concat([negative_prompt_embeds, pos_prompt_embeds], axis=0)
-        return prompt_embeds
-
-    @ms.jit
-    def latents_add_noise(self, image_latents, noise, ts):
-        latents = self.scheduler.add_noise(image_latents, noise, self.alphas_cumprod[ts])
-        return latents
-
-    @ms.jit
-    def scale_model_input(self, latents, t):
-        return self.scheduler.scale_model_input(latents, t)
-
-    @ms.jit
-    def predict_noise(self, x, t_continuous, c_crossattn, guidance_scale, c_concat=None):
-        """
-        The noise predicition model function that is used for DPM-Solver.
-        """
-        t_continuous = ops.tile(t_continuous.reshape(1), (x.shape[0],))
-        x_in = ops.concat([x] * 2, axis=0)
-        t_in = ops.concat([t_continuous] * 2, axis=0)
-        if c_concat is not None:
-            c_concat = ops.concat([c_concat] * 2, axis=0)
-        noise_pred = self.unet(x_in, t_in, c_concat=c_concat, c_crossattn=c_crossattn)
-        noise_pred_uncond, noise_pred_text = ops.split(noise_pred, split_size_or_sections=noise_pred.shape[0] // 2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-        if self.guidance_rescale > 0:
-            noise_pred = self.rescale_noise_cfg(noise_pred, noise_pred_text)
-        return noise_pred
-
-    def rescale_noise_cfg(self, noise_pred, noise_pred_text):
-        """
-        Rescale `noise_pred` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
-        Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
-        """
-        std_text = ops.std(noise_pred_text, axis=tuple(range(1, len(noise_pred_text.shape))), keepdims=True)
-        std_cfg = ops.std(noise_pred, axis=tuple(range(1, len(noise_pred.shape))), keepdims=True)
-        # rescale the results from guidance (fixes overexposure)
-        noise_pred_rescaled = noise_pred * (std_text / std_cfg)
-        # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
-        noise_pred = self.guidance_rescale * noise_pred_rescaled + (1 - self.guidance_rescale) * noise_pred
-        return noise_pred
-
     @abstractmethod
     def data_prepare(self, inputs):
         pass
 
     def __call__(self, inputs):
-        latents, c_crossattn, c_concat = self.data_prepare(inputs)
-        timesteps = inputs["timesteps"]
-        iterator = tqdm(timesteps, desc="Stable Diffusion Sampling", total=len(timesteps))
-        for i, t in enumerate(iterator):
-            ts = ms.Tensor(t, ms.int32)
-            latents = self.scale_model_input(latents, ts)
-            noise_pred = self.predict_noise(latents, ts, c_crossattn, inputs["scale"], c_concat)
-            latents = self.scheduler(noise_pred, ts, latents, self.num_inference_steps)
-        image = self.vae_decode(latents)
+        pos_crossattn, neg_crossattn, pos_vector, neg_vector, noise = self.data_prepare(inputs)
+        x, s_in = self.scheduler.prepare_sampling_loop(noise)
+
+        for i in tqdm(range(self.num_inference_steps), desc='SDXL sampling'):
+            noised_input, sigma_hats, next_sigma, sigma_hat = self.scheduler.pre_model_input(iter_index=i, x=x,
+                                                                                             s_in=s_in)
+            c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hats, noised_input.ndim)
+            model_output = self.unet(noised_input * c_in, c_noise,
+                                     context=ops.concat((neg_crossattn, pos_crossattn), 0),
+                                     y=ops.concat((neg_vector, pos_vector), 0))
+            x = self.scheduler(model_output=model_output, c_out=c_out, noised_input=noised_input, c_skip=c_skip,
+                               scale=inputs["scale"], x=x, sigma_hat=sigma_hat, next_sigma=next_sigma)
+        image = self.vae_decode(x)
         return image
 
 
@@ -123,6 +75,7 @@ class SDText2Img(SDInfer):
             unet,
             vae,
             scheduler,
+            denoiser,
             scale_factor=1.0,
             guidance_rescale=0.0,
             num_inference_steps=50,
@@ -132,14 +85,20 @@ class SDText2Img(SDInfer):
             unet,
             vae,
             scheduler,
+            denoiser,
             scale_factor=scale_factor,
             guidance_rescale=guidance_rescale,
             num_inference_steps=num_inference_steps,
         )
 
     def data_prepare(self, inputs):
-        batch, batch_uc = get_batch(
-            get_unique_embedder_keys_from_conditioner(self.text_encoder), inputs, num_samples, dtype=dtype
-        )
-        c_crossattn = self.prompt_embed(inputs["prompt"], inputs["negative_prompt"])
-        return latents, c_crossattn, None
+        clip_tokens = ms.Tensor(inputs["pos_clip_token"], dtype=ms.int32)
+        time_tokens = ms.Tensor(inputs["pos_time_token"], dtype=ms.int32)
+        uc_clip_tokens = ms.Tensor(inputs["neg_clip_token"], dtype=ms.int32)
+        uc_time_tokens = ms.Tensor(inputs["neg_time_token"], dtype=ms.int32)
+        noise = ms.Tensor(inputs["noise"], ms.float32)
+        pos_prompt_embeds = self.text_encoder(clip_tokens.split(1) + time_tokens.split(1))
+        negative_prompt_embeds = self.text_encoder(uc_clip_tokens.split(1) + uc_time_tokens.split(1))
+        pos_crossattn, neg_crossattn = pos_prompt_embeds[0], negative_prompt_embeds[0]
+        pos_vector, neg_vector = pos_prompt_embeds[1], negative_prompt_embeds[1]
+        return pos_crossattn, neg_crossattn, pos_vector, neg_vector, noise

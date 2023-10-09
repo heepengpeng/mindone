@@ -16,33 +16,23 @@ sys.path.append(os.path.dirname(workspace))
 from libs.infer_engine.export_modules import (
     NoisySample,
     PredictNoise,
-    SchedulerPreProcess,
+    SchedulerPreModelInput,
+    SchedulerPrepareSamplingLoop,
     Text2ImgDataPrepare, VAEDecoder,
+    Denoiser
 )
 
 logger = logging.getLogger("Stable Diffusion XL Export")
 
 
 def model_export(net, inputs, name, model_save_path):
-    ms.export(net, *inputs, file_name=os.path.join(model_save_path, name), file_format="MINDIR")
+    if len(inputs) == 0:
+        ms.export(net, file_name=os.path.join(model_save_path, name), file_format="MINDIR")
+    elif len(inputs) == 1:
+        ms.export(net, inputs, file_name=os.path.join(model_save_path, name), file_format="MINDIR")
+    else:
+        ms.export(net, *inputs, file_name=os.path.join(model_save_path, name), file_format="MINDIR")
     logger.info(f"convert {name} mindir done")
-
-
-def lite_convert(name, model_save_path, converter):
-    import mindspore_lite as mslite
-    logger.info(f"convert {name} lite mindir starting")
-
-    mindir_path = os.path.join(model_save_path, f"{name}.mindir")
-    if not os.path.exists(mindir_path):
-        mindir_path = os.path.join(model_save_path, f"{name}_graph.mindir")
-    converter.convert(
-        fmk_type=mslite.FmkType.MINDIR,
-        model_file=mindir_path,
-        output_file=os.path.join(model_save_path, f"{name}_lite"),
-        config_file="./libs/infer_engine/sd_lite.cfg",
-    )
-    logger.info(f"convert {name} lite mindir done")
-
 
 def main(args):
     # set logger
@@ -50,6 +40,7 @@ def main(args):
     ms.set_context(device_target="CPU")
 
     config = OmegaConf.load(f"{args.model}")
+    #create sampler
     sampler_config = OmegaConf.load(args.sampler)
     scheduler = instantiate_from_config(sampler_config)
     scheduler_type = sampler_config.type
@@ -78,54 +69,74 @@ def main(args):
 
         # data
         batch_size = args.n_samples
-        tokenized_prompts = [ops.ones((batch_size, 77), ms.int32),
-                             ops.ones((batch_size, 77), ms.int32),
-                             ops.ones((1, 2), dtype=ms.float16),
-                             ops.zeros((1, 2), dtype=ms.float16),
-                             ops.ones((1, 2), dtype=ms.float16)]
+        clip_tokens = ops.ones((batch_size * 2, 77), ms.int32)
+        time_tokens = ops.ones((batch_size * 3, 2), ms.int32)
 
         output_dim = 1024
-
-        cond = {
-            "concat": None,
-            "context": ops.ones((batch_size * 2, 77, output_dim * 2), ms.float32),
-            "y": ops.ones((batch_size*2, 2816), ms.float32)
-        }
-
-        noise = ops.ones((batch_size, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float16)
+        noise = ops.ones((batch_size, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
         ts = ops.ones((), ms.int32)
-        img = ops.ones((batch_size, 3, args.inputs.H, args.inputs.W), ms.float16)
-        mask = ops.ones((batch_size, 1, args.inputs.H, args.inputs.W), ms.float16)
         scale = ops.ones((), ms.float16)
+        sigma_hat_s = ops.ones(2, ms.float32)
+        noised_input = ops.ones((batch_size * 2, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
+        c_noise = ops.ones((2), ms.int32)
+        y = ops.ones((batch_size * 2, 2816), ms.float32)
+        context = ops.ones((batch_size * 2, 77, output_dim* 2), ms.float32)
+
+        model_output = ops.ones((batch_size * 2, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
+        c_out = ops.ones((2, 1, 1, 1), ms.float32)
+        c_skip = ops.ones((2, 1, 1, 1), ms.float32)
+        x = ops.ones((batch_size * 2, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
+        sigma_hat = ops.ones((), ms.float32)
+        next_sigma = ops.ones((), ms.float32)
+        s_in = ops.ones((1,), ms.float32)
 
         # create model
         text_encoder = model.conditioner
         unet = model.model
+        unet = unet.to_float(ms.float32)
         vae = model.first_stage_model
-        scheduler_preprocess, predict_noise, noisy_sample, vae_decoder = None, None, None, None
+        model_denoiser = model.denoiser
+
+        scheduler_prepare_sampling_loop, scheduler_preprocess, denoiser, predict_noise, noisy_sample, vae_decoder = None, None, None, None, None, None
         if args.task == "text2img":
             data_prepare = Text2ImgDataPrepare(text_encoder, vae, scheduler, model.scale_factor)
             model_export(
                 net=data_prepare,
-                inputs=(tokenized_prompts, tokenized_prompts, noise),
+                inputs=(clip_tokens, time_tokens, clip_tokens, time_tokens, noise),
                 name=args.inputs.data_prepare_model,
                 model_save_path=model_save_path,
             )
         else:
             raise ValueError(f"Not support task: {args.task}")
+        if scheduler_prepare_sampling_loop is None:
+            scheduler_prepare_sampling_loop = SchedulerPrepareSamplingLoop(scheduler)
+            model_export(
+                net=scheduler_prepare_sampling_loop,
+                inputs=noise,
+                name=f"{args.inputs.prepare_sampling_loop}-{scheduler_type}",
+                model_save_path=model_save_path,
+            )
         if scheduler_preprocess is None:
-            scheduler_preprocess = SchedulerPreProcess(scheduler)
+            scheduler_preprocess = SchedulerPreModelInput(scheduler)
             model_export(
                 net=scheduler_preprocess,
-                inputs=(noise, ts),
+                inputs=(noise, ts, s_in),
                 name=f"{args.inputs.scheduler_preprocess}-{scheduler_type}",
+                model_save_path=model_save_path,
+            )
+        if denoiser is None:
+            denoiser = Denoiser(model_denoiser)
+            model_export(
+                net=denoiser,
+                inputs=(sigma_hat_s, 4),
+                name=args.inputs.denoiser,
                 model_save_path=model_save_path,
             )
         if predict_noise is None:
             predict_noise = PredictNoise(unet)
             model_export(
                 net=predict_noise,
-                inputs=(noise, ts, cond, scale),
+                inputs=(noised_input, c_noise, context, y),
                 name=args.inputs.predict_noise_model,
                 model_save_path=model_save_path,
             )
@@ -133,7 +144,7 @@ def main(args):
             noisy_sample = NoisySample(scheduler)
             model_export(
                 net=noisy_sample,
-                inputs=(noise, ts, noise, ts),
+                inputs=(model_output, c_out, noised_input, c_skip, scale, x, sigma_hat, next_sigma),
                 name=f"{args.inputs.noisy_sample_model}-{scheduler_type}",
                 model_save_path=model_save_path,
             )
@@ -142,13 +153,6 @@ def main(args):
             model_export(
                 net=vae_decoder, inputs=(noise,), name=args.inputs.vae_decoder_model, model_save_path=model_save_path
             )
-    if args.converte_lite:
-        lite_convert(args.inputs.data_prepare_model, model_save_path, converter)
-        lite_convert(f"{args.inputs.scheduler_preprocess}-{scheduler_type}", model_save_path, converter)
-        lite_convert(args.inputs.predict_noise_model, model_save_path, converter)
-        lite_convert(f"{args.inputs.noisy_sample_model}-{scheduler_type}", model_save_path, converter)
-        lite_convert(args.inputs.vae_decoder_model, model_save_path, converter)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -172,29 +176,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model", type=str, required=True, help="path to config which constructs model.")
     parser.add_argument("--only_converte_lite", default=False, type=str2bool, help="whether convert MindSpore mindir")
-    parser.add_argument("--converte_lite", default=True, type=str2bool, help="whether convert lite mindir")
+    parser.add_argument("--converte_lite", default=False, type=str2bool, help="whether convert lite mindir")
     parser.add_argument("--output_path", type=str, default="output", help="dir to write results to")
-    parser.add_argument("--sampler", type=str, default="config/schedule/ddim.yaml", help="infer sampler yaml path")
+    parser.add_argument("--sampler", type=str, default="config/schedule/euler_edm.yaml", help="infer sampler yaml path")
     parser.add_argument(
         "--n_samples",
         type=int,
         default=1,
         help="how many samples to produce for each given prompt in an iteration. A.k.a. batch size",
-    )
-    parser.add_argument(
-        "--use_lora",
-        default=False,
-        type=str2bool,
-        help="whether the checkpoint used for inference is finetuned from LoRA",
-    )
-    parser.add_argument(
-        "--lora_rank",
-        default=None,
-        type=int,
-        help="LoRA rank. If None, lora checkpoint should contain the value for lora rank in its append_dict.",
-    )
-    parser.add_argument(
-        "--lora_ckpt_path", type=str, default=None, help="path to lora only checkpoint. Set it if use_lora is not None"
     )
     parser.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
     parser.add_argument("--log_level", type=str, default="INFO", help="log level, options: DEBUG, INFO, WARNING, ERROR")

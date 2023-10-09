@@ -7,9 +7,10 @@ import time
 import mindspore as ms
 import numpy as np
 from omegaconf import OmegaConf
+from transformers import CLIPTokenizer
 
-from libs.util import instantiate_from_config
 from libs.logger import set_logger
+from libs.tokenizer import get_tokenizer
 
 workspace = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(workspace))
@@ -17,36 +18,33 @@ sys.path.append(os.path.dirname(workspace))
 from libs.helper import VaeImageProcessor
 from libs.infer_engine.sd_lite_models import SDLiteText2Img
 
-logger = logging.getLogger("Stable Diffusion Lite Deploy")
+logger = logging.getLogger("Stable Diffusion XL Lite Deploy")
 
 
-def tokenize(tokenizer, texts):
-    SOT_TEXT = tokenizer.sot_text
-    EOT_TEXT = tokenizer.eot_text
-    CONTEXT_LEN = 77
-
-    if isinstance(texts, str):
-        texts = [texts]
-
-    sot_token = tokenizer.encoder[SOT_TEXT]
-    eot_token = tokenizer.encoder[EOT_TEXT]
-    all_tokens = [[sot_token] + tokenizer.encode(text) + [eot_token] for text in texts]
-    result = np.zeros((len(all_tokens), CONTEXT_LEN), np.int64)
-
-    for i, tokens in enumerate(all_tokens):
-        if len(tokens) > CONTEXT_LEN:
-            tokens = tokens[: CONTEXT_LEN - 1] + [eot_token]
-
-        result[i, : len(tokens)] = np.array(tokens, np.int64)
-
-    return result.astype(np.int32)
+def tokenize(batch, emb_models_config):
+    tokens = []
+    for c in emb_models_config:
+        tokenizer = c["tokenizer"]
+        if isinstance(tokenizer, CLIPTokenizer):
+            token = tokenizer(batch[c["input_key"]],
+                              truncation=True,
+                              max_length=77,
+                              return_length=True,
+                              return_overflowing_tokens=False,
+                              padding="max_length")["input_ids"]
+        else:
+            token = tokenizer(batch[c["input_key"]])
+        if isinstance(token, list):
+            token = np.array(token)
+        tokens.append(token)
+    return tokens
 
 
 def get_mindir_path(model_save_path, name):
     mindir_path = os.path.join(model_save_path, f"{name}_lite.mindir")
     if not os.path.exists(mindir_path):
-        mindir_path = os.path.join(model_save_path, f"{name}_lite_graph.mindir")
-    return mindir_path
+        mindir_path = os.path.join(model_save_path, f"{name}_graph_lite_graph.mindir")
+    return os.path.abspath(mindir_path)
 
 
 def main(args):
@@ -57,25 +55,28 @@ def main(args):
     args.base_count = len(os.listdir(args.sample_path))
 
     model_config = OmegaConf.load(args.model)
-    version = model_config.model.version
-    os.environ["SD_VERSION"] = version
     sampler_config = OmegaConf.load(args.sampler)
-    if model_config.model.prediction_type == "v":
-        sampler_config.params.prediction_type = "v_prediction"
-    scheduler = instantiate_from_config(sampler_config)
-    timesteps = scheduler.set_timesteps(args.sampling_steps)
     scheduler_type = sampler_config.type
     img_processor = VaeImageProcessor()
     args.model_save_path = f"{model_config.model.name}-{args.task}"
-    tokenizer = get_tokenizer(model_config.model.params.cond_stage_config.params.tokenizer_name)
+
+    emb_models = model_config.model.params.conditioner_config.params.emb_models
+    emb_models_config = []
+    for emb_model in emb_models:
+        emb_model_config = {"input_key": emb_model.input_key, "tokenizer": get_tokenizer(emb_model.tokenizer_name)}
+        emb_models_config.append(emb_model_config)
+
     model_save_path = os.path.join(args.output_path, args.model_save_path)
     logger.info(f"model_save_path: {model_save_path}")
 
     data_prepare = get_mindir_path(model_save_path, args.inputs.data_prepare_model)
     scheduler_preprocess = get_mindir_path(model_save_path, f"{args.inputs.scheduler_preprocess}-{scheduler_type}")
+    scheduler_prepare_sampling_loop = get_mindir_path(model_save_path,
+                                                      f"{args.inputs.prepare_sampling_loop}-{scheduler_type}")
     predict_noise = get_mindir_path(model_save_path, args.inputs.predict_noise_model)
     noisy_sample = get_mindir_path(model_save_path, f"{args.inputs.noisy_sample_model}-{scheduler_type}")
     vae_decoder = get_mindir_path(model_save_path, args.inputs.vae_decoder_model)
+    denoiser = get_mindir_path(model_save_path, args.inputs.denoiser)
 
     # read prompts
     batch_size = args.n_samples
@@ -93,12 +94,28 @@ def main(args):
             negative_data.append(blank_negative_prompt)
 
     # create inputs
+    batch = {"txt": data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+             "original_size_as_tuple": [[1024., 1024.]]}
+    batch_uc = {"txt": negative_data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+                "original_size_as_tuple": [[1024., 1024.]]}
+    # create inputs
     inputs = {}
-    inputs["prompt"] = prompt
-    inputs["prompt_data"] = tokenize(tokenizer, data)
-    inputs["negative_prompt"] = negative_prompt
-    inputs["negative_prompt_data"] = tokenize(tokenizer, negative_data)
-    inputs["timesteps"] = timesteps
+    batch_token = tokenize(batch, emb_models_config)
+    batch_uc_token = tokenize(batch_uc, emb_models_config)
+
+    pos_clip_token = np.concatenate((batch_token[0], batch_token[1]), axis=0).astype(np.int32)
+    pos_time_token = np.concatenate((batch_token[2], batch_token[3], batch_token[4]), axis=0).astype(np.float16)
+
+    neg_clip_token = np.concatenate((batch_uc_token[0], batch_uc_token[1]), axis=0).astype(np.int32)
+    neg_time_token = np.concatenate((batch_uc_token[2], batch_uc_token[3], batch_uc_token[4]), axis=0).astype(
+        np.float16)
+
+    inputs["pos_clip_token"] = pos_clip_token
+    inputs["pos_time_token"] = pos_time_token
+    inputs["neg_clip_token"] = neg_clip_token
+    inputs["neg_time_token"] = neg_time_token
+
+    inputs["timesteps"] = args.sampling_steps
     inputs["scale"] = np.array(args.scale, np.float16)
 
     # create model
@@ -109,6 +126,8 @@ def main(args):
             predict_noise,
             noisy_sample,
             vae_decoder,
+            denoiser,
+            scheduler_prepare_sampling_loop,
             device_target=args.device_target,
             device_id=int(os.getenv("DEVICE_ID", 0)),
             num_inference_steps=args.sampling_steps,
@@ -120,7 +139,7 @@ def main(args):
         start_time = time.time()
         inputs["noise"] = np.random.standard_normal(
             size=(batch_size, 4, args.inputs.H // 8, args.inputs.W // 8)
-        ).astype(np.float16)
+        ).astype(np.float32)
 
         x_samples = sd_infer(inputs)
         x_samples = img_processor.postprocess(x_samples)
@@ -159,10 +178,11 @@ if __name__ == "__main__":
              "if choose a task name, use the config/[task].yaml for inputs",
         choices=["text2img", "img2img", "inpaint"],
     )
-    parser.add_argument("--model", type=str, default=None, help="path to config which constructs model.")
+    parser.add_argument("--model", type=str, default="./config/model/sd_xl_base_inference.yaml",
+                        help="path to config which constructs model.")
     parser.add_argument("--output_path", type=str, default="output", help="dir to write results to")
-    parser.add_argument("--sampler", type=str, default="config/schedule/ddim.yaml", help="infer sampler yaml path")
-    parser.add_argument("--sampling_steps", type=int, default=50, help="number of ddim sampling steps")
+    parser.add_argument("--sampler", type=str, default="config/schedule/euler_edm.yaml", help="infer sampler yaml path")
+    parser.add_argument("--sampling_steps", type=int, default=40, help="number of ddim sampling steps")
     parser.add_argument("--n_iter", type=int, default=1, help="number of iterations or trials. sample this often, ")
     parser.add_argument(
         "--n_samples",
@@ -192,10 +212,6 @@ if __name__ == "__main__":
         args.model = os.path.join(workspace, args.model)
     if args.task == "text2img":
         inputs_config_path = "./config/text2img.yaml"
-    elif args.task == "img2img":
-        inputs_config_path = "./config/img2img.yaml"
-    elif args.task == "inpaint":
-        inputs_config_path = "./config/inpaint.yaml"
     else:
         raise ValueError(f"{args.task} is invalid, should be in [text2img, img2img, inpaint]")
     inputs = OmegaConf.load(inputs_config_path)

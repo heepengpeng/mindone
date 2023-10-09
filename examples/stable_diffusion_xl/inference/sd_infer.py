@@ -5,8 +5,11 @@ import sys
 import time
 
 import mindspore as ms
+import numpy as np
 from mindspore import ops
 from omegaconf import OmegaConf
+
+from libs.tokenizer import get_tokenizer
 
 workspace = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(workspace))
@@ -14,9 +17,28 @@ from libs.logger import set_logger
 from libs.sd_models import SDText2Img
 from libs.helper import set_env, load_model_from_config, VaeImageProcessor
 from gm.util import instantiate_from_config
-from libs.util import str2bool
+from transformers import CLIPTokenizer
 
 logger = logging.getLogger("Stable Diffusion XL Inference")
+
+
+def tokenize(batch, emb_models_config):
+    tokens = []
+    for c in emb_models_config:
+        tokenizer = c["tokenizer"]
+        if isinstance(tokenizer, CLIPTokenizer):
+            token = tokenizer(batch[c["input_key"]],
+                              truncation=True,
+                              max_length=77,
+                              return_length=True,
+                              return_overflowing_tokens=False,
+                              padding="max_length")["input_ids"]
+        else:
+            token = tokenizer(batch[c["input_key"]])
+        if isinstance(token, list):
+            token = np.array(token)
+        tokens.append(token)
+    return tokens
 
 
 def main(args):
@@ -24,13 +46,23 @@ def main(args):
     set_env(args)
     ms.set_context(device_target=args.device_target)
 
+    # create sampler
+    sampler_config = OmegaConf.load(args.sampler)
+    scheduler = instantiate_from_config(sampler_config)
+
     # create model
-    config = OmegaConf.load(f"{args.model}")
+    model_config = OmegaConf.load(f"{args.model}")
     model = load_model_from_config(
-        config,
-        ckpt=config.model.pretrained_ckpt,
+        model_config.model,
+        ckpt=model_config.model.pretrained_ckpt,
         freeze=True, load_filter=False, amp_level=args.ms_amp_level
     )
+    emb_models = model_config.model.params.conditioner_config.params.emb_models
+    emb_models_config = []
+    for emb_model in emb_models:
+        emb_model_config = {"input_key": emb_model.input_key, "tokenizer": get_tokenizer(emb_model.tokenizer_name)}
+        emb_models_config.append(emb_model_config)
+
     sampler_config = OmegaConf.load(args.sampler)
     scheduler = instantiate_from_config(sampler_config)
     timesteps = scheduler.set_timesteps(args.sampling_steps)
@@ -52,39 +84,36 @@ def main(args):
             negative_data.append(blank_negative_prompt)
 
     # create inputs
-    inputs = {
-        "prompt": args.prompt,
-        "negative_prompt": args.negative_prompt,
-        "orig_width": args.orig_width if args.orig_width else W,
-        "orig_height": args.orig_height if args.orig_height else H,
-        "target_width": args.target_width if args.target_width else W,
-        "target_height": args.target_height if args.target_height else H,
-        "crop_coords_top": max(args.crop_coords_top if args.crop_coords_top else 0, 0),
-        "crop_coords_left": max(args.crop_coords_left if args.crop_coords_left else 0, 0),
-        "aesthetic_score": 6.0,
-        "negative_aesthetic_score": 2.5,
-        "timesteps": timesteps,
-        "scale": ms.Tensor(args.scale, ms.float16),
-        "num_samples": 1,
-        "dtype": ms.float16
-    }
+    batch = {"txt": data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+             "original_size_as_tuple": [[1024., 1024.]]}
+    batch_uc = {"txt": negative_data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+                "original_size_as_tuple": [[1024., 1024.]]}
+
+    inputs = {}
+    batch_token = tokenize(batch, emb_models_config)
+    batch_uc_token = tokenize(batch_uc, emb_models_config)
+
+    pos_clip_token = np.concatenate((batch_token[0], batch_token[1]), axis=0).astype(np.int32)
+    pos_time_token = np.concatenate((batch_token[2], batch_token[3], batch_token[4]), axis=0).astype(np.float16)
+
+    neg_clip_token = np.concatenate((batch_uc_token[0], batch_uc_token[1]), axis=0).astype(np.int32)
+    neg_time_token = np.concatenate((batch_uc_token[2], batch_uc_token[3], batch_uc_token[4]), axis=0).astype(np.float16)
+
+    inputs["pos_clip_token"] = pos_clip_token
+    inputs["pos_time_token"] = pos_time_token
+    inputs["neg_clip_token"] = neg_clip_token
+    inputs["neg_time_token"] = neg_time_token
+    inputs["scale"] = ms.Tensor(args.scale, ms.float32)
 
     # create model
-    text_encoder = model.conditioner
-    unet = model.model
-    vae = model.first_stage_model
     img_processor = VaeImageProcessor()
-
-    if args.device_target != "Ascend":
-        unet.to_float(ms.float32)
-        vae.to_float(ms.float32)
-
     if args.task == "text2img":
         sd_infer = SDText2Img(
-            text_encoder,
-            unet,
-            vae,
+            model.conditioner,
+            model.model,
+            model.first_stage_model,
             scheduler,
+            model.denoiser,
             scale_factor=model.scale_factor,
             num_inference_steps=args.sampling_steps,
         )
@@ -100,7 +129,7 @@ def main(args):
     for n in range(args.n_iter):
         start_time = time.time()
         inputs["noise"] = ops.standard_normal((args.n_samples, 4, args.inputs.H // 8, args.inputs.W // 8)).astype(
-            ms.float16
+            ms.float32
         )
         x_samples = sd_infer(inputs)
         x_samples = img_processor.postprocess(x_samples)
@@ -135,11 +164,11 @@ if __name__ == "__main__":
              "if choose a task name, use the config/[task].yaml for inputs",
         choices=["text2img", "img2img", "inpaint"],
     )
-    parser.add_argument("--model", type=str, required=True, help="path to config which constructs model.")
+    parser.add_argument("--model", type=str, default="./config/model/sd_xl_base_inference.yaml", help="path to config which constructs model.")
     parser.add_argument("--output_path", type=str, default="output", help="dir to write results to")
-    parser.add_argument("--sampler", type=str, default="./config/schedule/dpmsolver_multistep.yaml",
+    parser.add_argument("--sampler", type=str, default="./config/schedule/euler_edm.yaml",
                         help="infer sampler yaml path")
-    parser.add_argument("--sampling_steps", type=int, default=50, help="number of sampling steps")
+    parser.add_argument("--sampling_steps", type=int, default=40, help="number of sampling steps")
     parser.add_argument("--n_iter", type=int, default=1, help="number of iterations or trials.")
     parser.add_argument(
         "--n_samples",
@@ -150,25 +179,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--scale",
         type=float,
-        default=9.0,
+        default=5.0,
         help="unconditional guidance scale: "
              "eps = eps(x, uncond) + scale * (eps(x, cond) - eps(x, uncond)). "
              "Simplified: `uc + scale * (uc - prompt)`",
-    )
-    parser.add_argument(
-        "--use_lora",
-        default=False,
-        type=str2bool,
-        help="whether the checkpoint used for inference is finetuned from LoRA",
-    )
-    parser.add_argument(
-        "--lora_rank",
-        default=None,
-        type=int,
-        help="LoRA rank. If None, lora checkpoint should contain the value for lora rank in its append_dict.",
-    )
-    parser.add_argument(
-        "--lora_ckpt_path", type=str, default=None, help="path to lora only checkpoint. Set it if use_lora is not None"
     )
     parser.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
     parser.add_argument("--log_level", type=str, default="INFO", help="log level, options: DEBUG, INFO, WARNING, ERROR")
@@ -184,7 +198,6 @@ if __name__ == "__main__":
         args.model = os.path.join(workspace, args.model)
     if args.task == "text2img":
         inputs_config_path = "./config/text2img.yaml"
-        default_ckpt = "./models/sd_v2_base-57526ee4.ckpt"
     else:
         raise ValueError(f"{args.task} is invalid, should be in [text2img, img2img, inpaint]")
     inputs = OmegaConf.load(inputs_config_path)
