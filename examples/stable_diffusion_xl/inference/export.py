@@ -70,7 +70,7 @@ def main(args):
         # data
         batch_size = args.n_samples
         clip_tokens = ops.ones((batch_size * 2, 77), ms.int32)
-        time_tokens = ops.ones((batch_size * 3, 2), ms.int32)
+        time_tokens = ops.ones((batch_size * 3, 2), dtype=ms.float16)
 
         output_dim = 1024
         noise = ops.ones((batch_size, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
@@ -85,7 +85,7 @@ def main(args):
         model_output = ops.ones((batch_size * 2, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
         c_out = ops.ones((2, 1, 1, 1), ms.float32)
         c_skip = ops.ones((2, 1, 1, 1), ms.float32)
-        x = ops.ones((batch_size * 2, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
+        x = ops.ones((batch_size, 4, args.inputs.H // 8, args.inputs.W // 8), ms.float32)
         sigma_hat = ops.ones((), ms.float32)
         next_sigma = ops.ones((), ms.float32)
         s_in = ops.ones((1,), ms.float32)
@@ -151,7 +151,7 @@ def main(args):
         if vae_decoder is None:
             vae_decoder = VAEDecoder(vae, model.scale_factor)
             model_export(
-                net=vae_decoder, inputs=(noise,), name=args.inputs.vae_decoder_model, model_save_path=model_save_path
+                net=vae_decoder, inputs=noise, name=args.inputs.vae_decoder_model, model_save_path=model_save_path
             )
 
 if __name__ == "__main__":

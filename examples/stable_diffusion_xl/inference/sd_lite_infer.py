@@ -94,9 +94,9 @@ def main(args):
             negative_data.append(blank_negative_prompt)
 
     # create inputs
-    batch = {"txt": data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+    batch = {"txt": data, "crop_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
              "original_size_as_tuple": [[1024., 1024.]]}
-    batch_uc = {"txt": negative_data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+    batch_uc = {"txt": negative_data, "crop_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
                 "original_size_as_tuple": [[1024., 1024.]]}
     # create inputs
     inputs = {}

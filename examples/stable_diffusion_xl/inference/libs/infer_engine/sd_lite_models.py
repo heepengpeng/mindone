@@ -54,14 +54,14 @@ class SDLite(ModelBase):
         x, s_in = self.scheduler_prepare_sampling_loop.predict([noise])
         for i in tqdm(range(inputs["timesteps"]), desc="SDXL lite sampling"):
             ts = self.scheduler_preprocess_input[1]
-            ts.set_data_from_numpy(np.array(i, np.int32))
+            ts.set_data_from_numpy(np.array(i).astype(np.int32))
             scheduler_preprocess_output = self.scheduler_preprocess.predict([x, ts, s_in])
             noised_input, sigma_hat_s, next_sigma, sigma_hat = scheduler_preprocess_output[0], \
                                                                scheduler_preprocess_output[1], \
                                                                scheduler_preprocess_output[2], \
                                                                scheduler_preprocess_output[3]
-            denoised_output = self.denoiser.predict([sigma_hat_s])
-            c_skip, c_out, c_in, c_noise = denoised_output[0], denoised_output[1], denoised_output[2], denoised_output[
+            denoiser_output = self.denoiser.predict([sigma_hat_s])
+            c_skip, c_out, c_in, c_noise = denoiser_output[0], denoiser_output[1], denoiser_output[2], denoiser_output[
                 3]
 
             predict_noise_noised_input = self.predict_noise_input[0]
@@ -81,7 +81,7 @@ class SDLite(ModelBase):
             noisy_sample_next_sigma_input = self.noisy_sample_input[7]
 
             noisy_sample_scale_input.set_data_from_numpy(scale)
-            noisy_sample_model_output_input.set_data_from_numpy(model_output.get_data_to_numpy())
+            noisy_sample_model_output_input.set_data_from_numpy(model_output.get_data_to_numpy().astype(np.float32))
             noisy_sample_c_out_input.set_data_from_numpy(c_out.get_data_to_numpy().astype(np.float32))
             noisy_sample_noised_input_input.set_data_from_numpy(noised_input.get_data_to_numpy())
             noisy_sample_c_skip_input.set_data_from_numpy(c_skip.get_data_to_numpy().astype(np.float32))
@@ -89,7 +89,8 @@ class SDLite(ModelBase):
             noisy_sample_sigma_hat_input.set_data_from_numpy(sigma_hat.get_data_to_numpy().astype(np.float32))
             noisy_sample_next_sigma_input.set_data_from_numpy(next_sigma.get_data_to_numpy().astype(np.float32))
 
-            x = self.noisy_sample.predict(
+            x = \
+                self.noisy_sample.predict(
                 [noisy_sample_model_output_input, noisy_sample_c_out_input, noisy_sample_noised_input_input,
                  noisy_sample_c_skip_input, noisy_sample_scale_input, noisy_sample_x_input,
                  noisy_sample_sigma_hat_input, noisy_sample_next_sigma_input]

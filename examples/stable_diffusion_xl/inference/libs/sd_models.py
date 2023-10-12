@@ -39,9 +39,7 @@ class SDInfer(ABC):
         self.scale_factor = scale_factor
         self.guidance_rescale = guidance_rescale
         self.num_inference_steps = ms.Tensor(num_inference_steps, ms.int32)
-        self.alphas_cumprod = scheduler.alphas_cumprod
 
-    @ms.jit
     def vae_decode(self, x):
         y = self.vae.decode(x / self.scale_factor)
         y = ops.clip_by_value((y + 1.0) / 2.0, clip_value_min=0.0, clip_value_max=1.0)
@@ -56,14 +54,16 @@ class SDInfer(ABC):
         x, s_in = self.scheduler.prepare_sampling_loop(noise)
 
         for i in tqdm(range(self.num_inference_steps), desc='SDXL sampling'):
-            noised_input, sigma_hats, next_sigma, sigma_hat = self.scheduler.pre_model_input(iter_index=i, x=x,
-                                                                                             s_in=s_in)
+            noised_input, sigma_hats, next_sigma, sigma_hat = self.scheduler.pre_model_input(
+                iter_index=i, x=x,
+                s_in=s_in)
             c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hats, noised_input.ndim)
             model_output = self.unet(noised_input * c_in, c_noise,
                                      context=ops.concat((neg_crossattn, pos_crossattn), 0),
                                      y=ops.concat((neg_vector, pos_vector), 0))
-            x = self.scheduler(model_output=model_output, c_out=c_out, noised_input=noised_input, c_skip=c_skip,
-                               scale=inputs["scale"], x=x, sigma_hat=sigma_hat, next_sigma=next_sigma)
+            x = self.scheduler(model_output=model_output, c_out=c_out, noised_input=noised_input,
+                               c_skip=c_skip,scale=inputs["scale"], x=x, sigma_hat=sigma_hat,
+                               next_sigma=next_sigma)
         image = self.vae_decode(x)
         return image
 
@@ -78,7 +78,7 @@ class SDText2Img(SDInfer):
             denoiser,
             scale_factor=1.0,
             guidance_rescale=0.0,
-            num_inference_steps=50,
+            num_inference_steps=40,
     ):
         super(SDText2Img, self).__init__(
             text_encoder,

@@ -8,9 +8,11 @@ from gm.util import append_dims
 
 
 class EulerEDMSampler(nn.Cell):
-    def __init__(self, num_steps=None, s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, scale=5.0,
+    def __init__(self, num_steps=None,
+                 s_churn=0.0,
+                 s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, scale=5.0,
                  num_timesteps=1000, linear_start=0.00085, linear_end=0.0120):
-        super(EulerEDMSampler, self).__init__()
+        super(self).__init__()
         self.num_steps = num_steps
         self.s_churn = s_churn
         self.s_tmin = s_tmin
@@ -19,7 +21,7 @@ class EulerEDMSampler(nn.Cell):
         self.scale = scale
         self.sigma_hat = ms.ops.zeros(1, ms.float32)
         self.num_timesteps = num_timesteps
-        betas = ms.ops.linspace(linear_start ** 0.5, linear_end ** 0.5, num_steps).astype(ms.float32) ** 2
+        betas = ms.ops.linspace(linear_start ** 0.5, linear_end ** 0.5, num_timesteps).astype(ms.float32) ** 2
         alphas = 1.0 - betas
         self.alphas_cumprod = ms.ops.cumprod(alphas, dim=0)
 
@@ -42,7 +44,7 @@ class EulerEDMSampler(nn.Cell):
 
         sigma_hat = sigma * (gamma + 1.0)
         if gamma > 0:
-            eps = ms.Tensor(np.random.rand(*x.shape), x.dtype) * self.s_noise
+            eps = ms.Tensor(np.random.randn(*x.shape), x.dtype) * self.s_noise
             x = x + eps * append_dims(sigma_hat ** 2 - s_in * sigmas[iter_index] ** 2, x.ndim) ** 0.5
         noised_input = ops.concat((x, x))
         sigma_hat_s = ops.concat((sigma_hat, sigma_hat))

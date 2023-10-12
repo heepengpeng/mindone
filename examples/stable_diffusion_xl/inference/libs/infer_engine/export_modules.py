@@ -23,7 +23,7 @@ class DataPrepare(nn.Cell):
 
 class Discretization(nn.Cell):
     def __init__(self, discretization):
-        super(Discretization).__init__()
+        super(Discretization, self).__init__()
         self.discretization = discretization
 
     def construct(self):
@@ -37,7 +37,8 @@ class SchedulerPreModelInput(nn.Cell):
         self.scheduler = scheduler
 
     def construct(self, x, i, s_in):
-        noised_input, sigma_hat_s, next_sigma, sigma_hat = self.scheduler.pre_model_input(iter_index=i, x=x, s_in=s_in)
+        noised_input, sigma_hat_s, next_sigma, sigma_hat = self.scheduler.pre_model_input(iter_index=i, x=x,
+                                                                                          s_in=s_in)
         return noised_input, sigma_hat_s, next_sigma, sigma_hat
 
 
@@ -58,7 +59,7 @@ class Denoiser(nn.Cell):
         self.denoiser = denoiser
 
     def construct(self, sigma_hat_s, ndim):
-        c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hat_s, ndim)
+        c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hat_s, 4)
         return c_skip, c_out, c_in, c_noise
 
 
@@ -78,7 +79,9 @@ class PredictNoise(nn.Cell):
         self.unet = unet
 
     def construct(self, noised_input, c_noise, context, y):
-        noise_pred = self.unet(x=noised_input, t=c_noise, context=context, contact=None, y=y)
+        noise_pred = self.unet(x=noised_input, t=c_noise,
+                               context=context, contact=None,
+                               y=y)
         return noise_pred
 
 
@@ -95,9 +98,9 @@ class NoisySample(nn.Cell):
         self.scheduler = scheduler
 
     def construct(self, model_output, c_out, noised_input, c_skip, scale, x, sigma_hat, next_sigma):
-        return self.scheduler(model_output=model_output, c_out=c_out, noised_input=noised_input, c_skip=c_skip,
-                              scale=scale, x=x,
-                              sigma_hat=sigma_hat, next_sigma=next_sigma)
+        return self.scheduler(model_output=model_output, c_out=c_out, noised_input=noised_input,
+                              c_skip=c_skip, scale=scale, x=x, sigma_hat=sigma_hat,
+                              next_sigma=next_sigma)
 
 
 class VAEDecoder(nn.Cell):

@@ -16,14 +16,14 @@ class SimpleTokenizerWrapper:
             texts = [texts]
         sot_token = self.tokenizer.encoder["<start_of_text>"]
         eot_token = self.tokenizer.encoder["<end_of_text>"]
-        all_tokens = [[sot_token] + _tokenizer.encoder(text) + [eot_token] for text in texts]
+        all_tokens = [[sot_token] + _tokenizer.encode(text) + [eot_token] for text in texts]
         result = np.zeros((len(all_tokens), context_length), np.int32)
 
         for i, tokens in enumerate(all_tokens):
             if len(tokens) > context_length:
                 tokens = tokens[:context_length]
                 tokens[-1] = eot_token
-            result[i, len(tokens)] = np.array(tokens, np.int32)
+            result[i, : len(tokens)] = np.array(tokens, np.int32)
         return result
 
 
