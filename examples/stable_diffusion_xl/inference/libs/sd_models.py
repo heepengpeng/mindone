@@ -54,10 +54,10 @@ class SDInfer(ABC):
         x, s_in = self.scheduler.prepare_sampling_loop(noise)
 
         for i in tqdm(range(self.num_inference_steps), desc='SDXL sampling'):
-            noised_input, sigma_hats, next_sigma, sigma_hat = self.scheduler.pre_model_input(
+            noised_input, sigma_hat_s, next_sigma, sigma_hat = self.scheduler.pre_model_input(
                 iter_index=i, x=x,
                 s_in=s_in)
-            c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hats, noised_input.ndim)
+            c_skip, c_out, c_in, c_noise = self.denoiser(sigma_hat_s, noised_input.ndim)
             model_output = self.unet(noised_input * c_in, c_noise,
                                      context=ops.concat((neg_crossattn, pos_crossattn), 0),
                                      y=ops.concat((neg_vector, pos_vector), 0))

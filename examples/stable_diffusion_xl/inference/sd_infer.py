@@ -63,10 +63,6 @@ def main(args):
         emb_model_config = {"input_key": emb_model.input_key, "tokenizer": get_tokenizer(emb_model.tokenizer_name)}
         emb_models_config.append(emb_model_config)
 
-    sampler_config = OmegaConf.load(args.sampler)
-    scheduler = instantiate_from_config(sampler_config)
-    timesteps = scheduler.set_timesteps(args.sampling_steps)
-
     # read prompts
     batch_size = args.n_samples
     prompt = args.inputs.prompt
@@ -84,9 +80,9 @@ def main(args):
             negative_data.append(blank_negative_prompt)
 
     # create inputs
-    batch = {"txt": data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+    batch = {"txt": data, "crop_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
              "original_size_as_tuple": [[1024., 1024.]]}
-    batch_uc = {"txt": negative_data, "corp_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
+    batch_uc = {"txt": negative_data, "crop_coords_top_left": [[0., 0.]], "target_size_as_tuple": [[1024., 1024.]],
                 "original_size_as_tuple": [[1024., 1024.]]}
 
     inputs = {}
@@ -103,6 +99,7 @@ def main(args):
     inputs["pos_time_token"] = pos_time_token
     inputs["neg_clip_token"] = neg_clip_token
     inputs["neg_time_token"] = neg_time_token
+    inputs["timesteps"] = args.sampling_steps
     inputs["scale"] = ms.Tensor(args.scale, ms.float32)
 
     # create model
