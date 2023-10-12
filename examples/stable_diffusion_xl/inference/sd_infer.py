@@ -119,8 +119,8 @@ def main(args):
 
     logger.info(
         f"Generating images with conditions:\n"
-        f"Prompt(s): {inputs['prompt']}, \n"
-        f"Negative prompt(s): {inputs['negative_prompt']}"
+        f"Prompt(s): {prompt}, \n"
+        f"Negative prompt(s): {negative_prompt}"
     )
 
     for n in range(args.n_iter):
@@ -183,6 +183,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=42, help="the seed (for reproducible sampling)")
     parser.add_argument("--log_level", type=str, default="INFO", help="log level, options: DEBUG, INFO, WARNING, ERROR")
+    parser.add_argument("--ms_amp_level", type=str, default="O2", help="mixed precision level")
     args = parser.parse_args()
     set_logger(name="", output_dir=args.output_path, rank=0, log_level=args.log_level)
 

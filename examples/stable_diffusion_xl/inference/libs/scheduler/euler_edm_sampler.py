@@ -8,11 +8,9 @@ from gm.util import append_dims
 
 
 class EulerEDMSampler(nn.Cell):
-    def __init__(self, num_steps=None,
-                 s_churn=0.0,
-                 s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, scale=5.0,
+    def __init__(self, num_steps=None, s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0, scale=5.0,
                  num_timesteps=1000, linear_start=0.00085, linear_end=0.0120):
-        super(self).__init__()
+        super().__init__()
         self.num_steps = num_steps
         self.s_churn = s_churn
         self.s_tmin = s_tmin
